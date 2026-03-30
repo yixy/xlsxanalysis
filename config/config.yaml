@@ -1,6 +1,7 @@
 db_path: "./data.db"
 source_dir: "./xlsx_files"
 batch_size: 5000 # 每 100 条数据提交一次事务，提高写入速度
+export_path: "./combined_results.xlsx" # 导出结果路径，为空则不导出
 
 tables:
   - table_name: "sql_scan"

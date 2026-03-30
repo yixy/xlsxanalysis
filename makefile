@@ -26,7 +26,7 @@ build:
 clean:
 	@echo "正在清理..."
 	$(GO_CLEAN)
-	rm -f target/*
+	rm -rf target/*
 	@echo "清理完毕。"
 
 # 运行测试

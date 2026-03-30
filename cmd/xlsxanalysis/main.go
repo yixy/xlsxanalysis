@@ -16,10 +16,11 @@ import (
 
 // Config 对应 config.yaml 结构
 type Config struct {
-	DBPath    string        `yaml:"db_path"`
-	SourceDir string        `yaml:"source_dir"`
-	BatchSize int           `yaml:"batch_size"`
-	Tables    []TableConfig `yaml:"tables"`
+	DBPath     string        `yaml:"db_path"`
+	SourceDir  string        `yaml:"source_dir"`
+	BatchSize  int           `yaml:"batch_size"`
+	ExportPath string        `yaml:"export_path"`
+	Tables     []TableConfig `yaml:"tables"`
 }
 
 type TableConfig struct {
@@ -70,6 +71,15 @@ func main() {
 			}
 		}
 	}
+
+	// 4. 导出到 Excel (如果配置了 export_path)
+	if config.ExportPath != "" {
+		fmt.Printf("正在导出数据到: %s\n", config.ExportPath)
+		if err := exportToExcel(db, config); err != nil {
+			log.Fatalf("导出 Excel 失败: %v", err)
+		}
+	}
+
 	fmt.Println("任务处理完成！")
 }
 
@@ -219,4 +229,65 @@ func processExcel(db *sql.DB, filePath string, conf *Config) error {
 	}
 
 	return nil
+}
+
+func exportToExcel(db *sql.DB, conf *Config) error {
+	f := excelize.NewFile()
+	defer f.Close()
+
+	for i, tableConf := range conf.Tables {
+		sheetName := tableConf.TableName
+		// 如果是第一个表格，重命名默认的 Sheet1，否则新建 Sheet
+		if i == 0 {
+			f.SetSheetName("Sheet1", sheetName)
+		} else {
+			f.NewSheet(sheetName)
+		}
+
+		// 构造表头
+		headers := []string{"source_file", "processed_at"}
+		for _, col := range tableConf.Columns {
+			if col.DBCol != "" {
+				headers = append(headers, col.DBCol)
+			}
+		}
+
+		// 写入表头
+		for colIdx, header := range headers {
+			cell, _ := excelize.CoordinatesToCellName(colIdx+1, 1)
+			f.SetCellValue(sheetName, cell, header)
+		}
+
+		// 查询数据
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(headers, ", "), tableConf.TableName)
+		rows, err := db.Query(query)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		rowIdx := 2
+		for rows.Next() {
+			// 准备接收数据的切片
+			values := make([]interface{}, len(headers))
+			valuePtrs := make([]interface{}, len(headers))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return err
+			}
+
+			// 写入行数据
+			for colIdx, val := range values {
+				cell, _ := excelize.CoordinatesToCellName(colIdx+1, rowIdx)
+				f.SetCellValue(sheetName, cell, val)
+			}
+			rowIdx++
+		}
+		fmt.Printf("表 %s 已导出 %d 条数据\n", sheetName, rowIdx-2)
+	}
+
+	return f.SaveAs(conf.ExportPath)
 }
