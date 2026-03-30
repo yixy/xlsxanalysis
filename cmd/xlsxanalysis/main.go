@@ -3,291 +3,465 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/xuri/excelize/v2"
-	"gopkg.in/yaml.v3"
-	_ "modernc.org/sqlite" // 纯 Go 实现的 SQLite 驱动，无需 CGO
+	"github.com/tealeg/xlsx"
+	_ "modernc.org/sqlite"
+	"gopkg.in/yaml.v2"
 )
 
-// Config 对应 config.yaml 结构
+// Config 配置文件结构
 type Config struct {
-	DBPath     string        `yaml:"db_path"`
-	SourceDir  string        `yaml:"source_dir"`
-	BatchSize  int           `yaml:"batch_size"`
-	ExportPath string        `yaml:"export_path"`
-	Tables     []TableConfig `yaml:"tables"`
+	DBPath      string  `yaml:"db_path"`
+	SourceDir   string  `yaml:"source_dir"`
+	BatchSize   int     `yaml:"batch_size"`
+	ExportPath  string  `yaml:"export_path"`
+	Tables      []Table `yaml:"tables"`
 }
 
-type TableConfig struct {
-	TableName  string           `yaml:"table_name"`
-	SheetIndex int              `yaml:"sheet_index"`
-	Columns    []ColumnProperty `yaml:"columns"`
+// Table 表配置结构
+type Table struct {
+	TableName  string    `yaml:"table_name"`
+	SheetIndex int       `yaml:"sheet_index"`
+	Columns    []Column  `yaml:"columns"`
 }
 
-// ColumnProperty 兼容 YAML 中混合定义的列属性
-type ColumnProperty struct {
-	FilenameSource string `yaml:"filename_source,omitempty"`
-	FilenameCell   string `yaml:"filename_cell,omitempty"`
-	ExcelCol       string `yaml:"excel_col,omitempty"`
-	DBCol          string `yaml:"db_col,omitempty"`
-	DBType         string `yaml:"db_type,omitempty"`
+// Column 列配置结构
+type Column struct {
+	FilenameSource string `yaml:"filename_source"` // 指定文件名来源类型 (name/cell)
+	FilenameCell   string `yaml:"filename_cell"`   // 如果FilenameSource是cell，则从此单元格获取文件名
+	ExcelCol       string `yaml:"excel_col"`       // Excel列名
+	DBCol          string `yaml:"db_col"`          // 数据库字段名
+	DBType         string `yaml:"db_type"`         // 数据库类型
+}
+
+// XlsxFileInfo 存储Excel文件信息
+type XlsxFileInfo struct {
+	Name string
+	Path string
 }
 
 func main() {
-	// 1. 加载配置
+	fmt.Println("开始解析XLSX文件...")
+
+	// 读取配置文件
 	config, err := loadConfig("./config/config.yaml")
 	if err != nil {
-		log.Fatalf("无法加载配置文件: %v", err)
+		fmt.Printf("加载配置文件失败: %v\n", err)
+		return
 	}
 
-	// 2. 初始化数据库
+	// 确保数据库目录存在
+	dbDir := filepath.Dir(config.DBPath)
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		fmt.Printf("创建数据库目录失败: %v\n", err)
+		return
+	}
+
+	// 连接SQLite数据库
 	db, err := sql.Open("sqlite", config.DBPath)
 	if err != nil {
-		log.Fatalf("无法打开数据库: %v", err)
+		fmt.Printf("连接数据库失败: %v\n", err)
+		return
 	}
 	defer db.Close()
 
-	if err := initDatabase(db, config); err != nil {
-		log.Fatalf("数据库初始化失败: %v", err)
-	}
-
-	// 3. 扫描目录并处理文件
-	files, err := os.ReadDir(config.SourceDir)
+	// 获取要处理的xlsx文件列表
+	xlsxFiles, err := getXlsxFiles(config.SourceDir)
 	if err != nil {
-		log.Fatalf("无法读取源目录: %v", err)
+		fmt.Printf("获取XLSX文件列表失败: %v\n", err)
+		return
 	}
 
-	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".xlsx") {
-			filePath := filepath.Join(config.SourceDir, file.Name())
-			fmt.Printf("正在处理文件: %s\n", file.Name())
-			if err := processExcel(db, filePath, config); err != nil {
-				log.Printf("处理文件 %s 出错: %v", file.Name(), err)
-			}
-		}
-	}
+	fmt.Printf("找到 %d 个XLSX文件\n", len(xlsxFiles))
 
-	// 4. 导出到 Excel (如果配置了 export_path)
-	if config.ExportPath != "" {
-		fmt.Printf("正在导出数据到: %s\n", config.ExportPath)
-		if err := exportToExcel(db, config); err != nil {
-			log.Fatalf("导出 Excel 失败: %v", err)
-		}
-	}
-
-	fmt.Println("任务处理完成！")
-}
-
-func loadConfig(path string) (*Config, error) {
-	buf, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var conf Config
-	err = yaml.Unmarshal(buf, &conf)
-	return &conf, err
-}
-
-func initDatabase(db *sql.DB, conf *Config) error {
-	for _, table := range conf.Tables {
-		var colDefs []string
-		// 固定添加 source_file 和 processed_at 字段用于追踪来源和处理时间
-		colDefs = append(colDefs, "source_file TEXT", "processed_at TEXT")
-
-		for _, col := range table.Columns {
-			if col.DBCol != "" {
-				colDefs = append(colDefs, fmt.Sprintf("%s %s", col.DBCol, col.DBType))
-			}
-		}
-		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", table.TableName, strings.Join(colDefs, ", "))
-		_, err := db.Exec(query)
+	// 处理每个表配置
+	for _, tableConfig := range config.Tables {
+		// 创建表
+		err = createTable(db, &tableConfig)
 		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func processExcel(db *sql.DB, filePath string, conf *Config) error {
-	f, err := excelize.OpenFile(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	for _, tableConf := range conf.Tables {
-		sheetList := f.GetSheetList()
-		if tableConf.SheetIndex >= len(sheetList) {
-			return fmt.Errorf("sheet 索引 %d 超出范围", tableConf.SheetIndex)
-		}
-		sheetName := sheetList[tableConf.SheetIndex]
-
-		// 获取数据来源标识
-		var sourceValue string
-		var mappingCols []ColumnProperty
-
-		for _, col := range tableConf.Columns {
-			if col.FilenameSource != "" {
-				if col.FilenameSource == "cell" {
-					// 稍后根据下面的 FilenameCell 获取
-				} else if col.FilenameSource == "name" {
-					sourceValue = filepath.Base(filePath)
-				}
-			}
-			if col.FilenameCell != "" {
-				val, _ := f.GetCellValue(sheetName, col.FilenameCell)
-				sourceValue = val
-			}
-			if col.ExcelCol != "" {
-				mappingCols = append(mappingCols, col)
-			}
-		}
-		if sourceValue == "" {
-			sourceValue = filepath.Base(filePath) // 兜底使用文件名
+			fmt.Printf("创建表 %s 失败: %v\n", tableConfig.TableName, err)
+			continue
 		}
 
-		// 读取所有行
-		rows, err := f.GetRows(sheetName)
-		if err != nil {
-			return err
-		}
+		// 处理每个XLSX文件
+		for _, fileInfo := range xlsxFiles {
+			fmt.Printf("正在处理文件: %s\n", fileInfo.Name)
 
-		// 准备 SQL
-		var dbCols []string
-		var placeholders []string
-		dbCols = append(dbCols, "source_file", "processed_at")
-		placeholders = append(placeholders, "?", "?")
-		for _, col := range mappingCols {
-			dbCols = append(dbCols, col.DBCol)
-			placeholders = append(placeholders, "?")
-		}
-
-		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-			tableConf.TableName,
-			strings.Join(dbCols, ","),
-			strings.Join(placeholders, ","))
-
-		// 开启事务批量写入
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-
-		stmt, err := tx.Prepare(insertSQL)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-
-		count := 0
-		for i, row := range rows {
-			// 假设第一行通常是标题，或者根据实际逻辑跳过
-			if i == 0 {
-				continue
-			}
-
-			values := []interface{}{sourceValue, time.Now().Format("2006-01-02 15:04:05")}
-			//hasData 的作用是过滤掉无效行。它确保程序只向数据库插入那些“在你关心的列上确实存在数据（或者至少该行长度覆盖到了你关心的列）”的行，防止数据库被大量的空记录填满。
-			hasData := false
-			for _, col := range mappingCols {
-				colIdx, _ := excelize.ColumnNameToNumber(col.ExcelCol)
-				val := ""
-				if colIdx-1 < len(row) {
-					val = row[colIdx-1]
-					hasData = true
-				}
-				values = append(values, val)
-			}
-
-			if !hasData {
-				continue
-			}
-
-			_, err := stmt.Exec(values...)
+			// 解析Excel文件
+			xlFile, err := xlsx.OpenFile(fileInfo.Path)
 			if err != nil {
-				log.Printf("写入行 %d 失败: %v", i, err)
+				fmt.Printf("打开文件失败 %s: %v\n", fileInfo.Name, err)
 				continue
 			}
 
-			count++
-			if count%conf.BatchSize == 0 {
-				// 提交当前批次（此处为了简化，实际生产可调整事务粒度）
+			// 检查是否有足够的工作表
+			if len(xlFile.Sheets) <= tableConfig.SheetIndex {
+				fmt.Printf("工作表索引 %d 超出范围，文件只有 %d 个工作表\n", tableConfig.SheetIndex, len(xlFile.Sheets))
+				continue
+			}
+
+			sheet := xlFile.Sheets[tableConfig.SheetIndex]
+
+			// 转换为字符串数组
+			rows := make([][]string, 0)
+			for _, row := range sheet.Rows {
+				if row != nil {
+					rowStr := make([]string, 0)
+					for _, cell := range row.Cells {
+						rowStr = append(rowStr, cell.String())
+					}
+					rows = append(rows, rowStr)
+				}
+			}
+
+			// 跳过空表
+			if len(rows) <= 1 {
+				fmt.Printf("文件 %s 的工作表为空或只包含标题行\n", fileInfo.Name)
+				continue
+			}
+
+			// 跳过标题行
+			rows = rows[1:]
+
+			// 找到 filename source 列的配置
+			var filenameCol *Column
+			for i, col := range tableConfig.Columns {
+				if col.FilenameSource != "" {
+					filenameCol = &tableConfig.Columns[i]
+					break
+				}
+			}
+
+			// 确定源文件名，可能是文件名或单元格内容
+			sourceFileName := fileInfo.Name
+			if filenameCol != nil && filenameCol.FilenameSource == "cell" && filenameCol.FilenameCell != "" {
+				// 从单元格获取文件名
+				cellCoord := filenameCol.FilenameCell
+				colIdx, rowIdx := getXlsxCellCoords(cellCoord)
+				if rowIdx < len(sheet.Rows) && colIdx < len(sheet.Rows[rowIdx].Cells) {
+					sourceFileName = sheet.Rows[rowIdx].Cells[colIdx].String()
+				}
+			}
+
+			err = batchInsertData(db, &tableConfig, rows, sourceFileName, config.BatchSize)
+			if err != nil {
+				fmt.Printf("插入数据失败 %s: %v\n", fileInfo.Name, err)
 			}
 		}
-
-		stmt.Close()
-		err = tx.Commit()
-		if err != nil {
-			return err
-		}
-		fmt.Printf("表 %s 已写入 %d 条数据\n", tableConf.TableName, count)
 	}
 
-	return nil
+	// 如果配置了导出路径，则导出数据库表到Excel文件
+	if config.ExportPath != "" {
+		err = exportToExcel(db, config.Tables, config.ExportPath)
+		if err != nil {
+			fmt.Printf("导出到Excel失败: %v\n", err)
+		} else {
+			fmt.Printf("数据已导出到: %s\n", config.ExportPath)
+		}
+	}
+
+	fmt.Println("所有XLSX文件处理完成!")
 }
 
-func exportToExcel(db *sql.DB, conf *Config) error {
-	f := excelize.NewFile()
-	defer f.Close()
+// exportToExcel 将数据库表导出到Excel文件
+func exportToExcel(db *sql.DB, tables []Table, exportPath string) error {
+	// 确保导出目录存在
+	exportDir := filepath.Dir(exportPath)
+	if err := os.MkdirAll(exportDir, 0755); err != nil {
+		return fmt.Errorf("创建导出目录失败: %v", err)
+	}
 
-	for i, tableConf := range conf.Tables {
-		sheetName := tableConf.TableName
-		// 如果是第一个表格，重命名默认的 Sheet1，否则新建 Sheet
-		if i == 0 {
-			f.SetSheetName("Sheet1", sheetName)
-		} else {
-			f.NewSheet(sheetName)
+	// 创建Excel文件
+	xlsxFile := xlsx.NewFile()
+
+	for _, tableConfig := range tables {
+		sheet, err := xlsxFile.AddSheet(tableConfig.TableName)
+		if err != nil {
+			return fmt.Errorf("创建工作表 %s 失败: %v", tableConfig.TableName, err)
 		}
 
-		// 构造表头
-		headers := []string{"source_file", "processed_at"}
-		for _, col := range tableConf.Columns {
-			if col.DBCol != "" {
-				headers = append(headers, col.DBCol)
+		// 查询表数据
+		query := fmt.Sprintf(`SELECT source_file, processed_time`)
+		
+		// 添加配置中定义的其他列
+		for _, col := range tableConfig.Columns {
+			if col.FilenameSource != "" || col.FilenameCell != "" {
+				continue
 			}
+			query += fmt.Sprintf(", %s", col.DBCol)
 		}
+		
+		query += fmt.Sprintf(` FROM "%s" ORDER BY id`, tableConfig.TableName)
 
-		// 写入表头
-		for colIdx, header := range headers {
-			cell, _ := excelize.CoordinatesToCellName(colIdx+1, 1)
-			f.SetCellValue(sheetName, cell, header)
-		}
-
-		// 查询数据
-		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(headers, ", "), tableConf.TableName)
 		rows, err := db.Query(query)
 		if err != nil {
-			return err
+			return fmt.Errorf("查询表 %s 数据失败: %v", tableConfig.TableName, err)
 		}
 		defer rows.Close()
 
-		rowIdx := 2
+		// 获取列信息
+		columns, err := rows.Columns()
+		if err != nil {
+			return fmt.Errorf("获取列信息失败: %v", err)
+		}
+
+		// 创建标题行
+		headerRow := sheet.AddRow()
+		for _, colName := range columns {
+			headerRow.AddCell().SetValue(colName)
+		}
+
+		// 遍历结果并添加到Excel
 		for rows.Next() {
-			// 准备接收数据的切片
-			values := make([]interface{}, len(headers))
-			valuePtrs := make([]interface{}, len(headers))
+			row := sheet.AddRow()
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			
 			for i := range values {
 				valuePtrs[i] = &values[i]
 			}
 
-			if err := rows.Scan(valuePtrs...); err != nil {
+			err = rows.Scan(valuePtrs...)
+			if err != nil {
+				return fmt.Errorf("扫描行数据失败: %v", err)
+			}
+
+			for _, val := range values {
+				cell := row.AddCell()
+				
+				// 处理不同类型的值
+				switch v := val.(type) {
+				case []byte:
+					cell.SetValue(string(v))
+				case time.Time:
+					cell.SetValue(v.Format("2006-01-02 15:04:05"))
+				default:
+					cell.SetValue(val)
+				}
+			}
+		}
+	}
+
+	// 保存Excel文件
+	err := xlsxFile.Save(exportPath)
+	if err != nil {
+		return fmt.Errorf("保存Excel文件失败: %v", err)
+	}
+
+	return nil
+}
+
+// getXlsxCellCoords 将Excel单元格坐标转换为行列索引（从0开始）
+func getXlsxCellCoords(cell string) (col, row int) {
+	col = 0
+	i := 0
+	for ; i < len(cell) && cell[i] >= 'A' && cell[i] <= 'Z'; i++ {
+		col = col*26 + int(cell[i]-'A'+1)
+	}
+	col-- // 转换为从0开始的索引
+
+	rowStr := cell[i:]
+	fmt.Sscanf(rowStr, "%d", &row)
+	row-- // 转换为从0开始的索引
+
+	return col, row
+}
+
+// loadConfig 加载配置文件
+func loadConfig(path string) (*Config, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	// 设置默认值
+	if config.BatchSize <= 0 {
+		config.BatchSize = 100
+	}
+
+	return &config, nil
+}
+
+// getXlsxFiles 获取指定目录下的所有xlsx文件
+func getXlsxFiles(dir string) ([]XlsxFileInfo, error) {
+	var files []XlsxFileInfo
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() && (strings.HasSuffix(strings.ToLower(info.Name()), ".xlsx") ||
+			strings.HasSuffix(strings.ToLower(info.Name()), ".xls")) {
+			files = append(files, XlsxFileInfo{
+				Name: info.Name(),
+				Path: path,
+			})
+		}
+
+		return nil
+	})
+
+	return files, err
+}
+
+// createTable 创建数据库表
+func createTable(db *sql.DB, tableConfig *Table) error {
+	// 构建列定义
+	columnDefs := []string{}
+	
+	// 添加文件名字段
+	columnDefs = append(columnDefs, `"source_file" TEXT`)
+	
+	// 添加处理时间字段
+	columnDefs = append(columnDefs, `"processed_time" DATETIME`)
+	
+	// 添加配置中定义的其他列
+	for _, col := range tableConfig.Columns {
+		// 跳过filename相关的配置项，因为它们是特殊处理的
+		if col.FilenameSource != "" || col.FilenameCell != "" {
+			continue
+		}
+		columnDefs = append(columnDefs, fmt.Sprintf(`"%s" %s`, col.DBCol, col.DBType))
+	}
+
+	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (
+		"id" INTEGER PRIMARY KEY AUTOINCREMENT,
+		%s
+	)`, tableConfig.TableName, strings.Join(columnDefs, ",\n		"))
+
+	_, err := db.Exec(query)
+	return err
+}
+
+// batchInsertData 批量插入数据
+func batchInsertData(db *sql.DB, tableConfig *Table, rows [][]string, sourceFileName string, batchSize int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// 准备插入语句 - 只包括实际的列，排除filename相关的配置
+	columnNames := []string{"source_file", "processed_time"}
+	valuePlaceholders := []string{"?", "?"}
+	
+	for _, col := range tableConfig.Columns {
+		if col.FilenameSource != "" || col.FilenameCell != "" {
+			continue
+		}
+		// 确保列名不是空字符串
+		if col.DBCol != "" {
+			columnNames = append(columnNames, fmt.Sprintf(`"%s"`, col.DBCol))
+			valuePlaceholders = append(valuePlaceholders, "?")
+		}
+	}
+
+	// 如果没有有效的列，跳过插入
+	if len(columnNames) <= 2 { // 只有source_file和processed_time
+		fmt.Printf("没有找到有效的数据列，跳过插入\n")
+		return nil
+	}
+
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO "%s" (%s) VALUES (%s)`,
+		tableConfig.TableName,
+		strings.Join(columnNames, ", "),
+		strings.Join(valuePlaceholders, ", "),
+	)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(insertQuery)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+	batchCount := 0
+
+	for _, row := range rows {
+		values := []interface{}{sourceFileName, now}
+
+		for _, col := range tableConfig.Columns {
+			if col.FilenameSource != "" || col.FilenameCell != "" {
+				continue
+			}
+			
+			// 确保列名不是空字符串
+			if col.DBCol != "" {
+				// 根据列索引获取单元格值
+				colIndex := getColumnIndex(col.ExcelCol)
+				if colIndex < len(row) {
+					values = append(values, strings.TrimSpace(row[colIndex]))
+				} else {
+					values = append(values, "")
+				}
+			}
+		}
+
+		_, err := stmt.Exec(values...)
+		if err != nil {
+			return fmt.Errorf("执行插入语句失败: %v", err)
+		}
+
+		batchCount++
+		if batchCount >= batchSize {
+			err = tx.Commit()
+			if err != nil {
 				return err
 			}
 
-			// 写入行数据
-			for colIdx, val := range values {
-				cell, _ := excelize.CoordinatesToCellName(colIdx+1, rowIdx)
-				f.SetCellValue(sheetName, cell, val)
+			tx, err = db.Begin()
+			if err != nil {
+				return err
 			}
-			rowIdx++
+			defer tx.Rollback()
+
+			stmt.Close()
+			stmt, err = tx.Prepare(insertQuery)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+
+			batchCount = 0
 		}
-		fmt.Printf("表 %s 已导出 %d 条数据\n", sheetName, rowIdx-2)
 	}
 
-	return f.SaveAs(conf.ExportPath)
+	// 提交剩余的数据
+	if batchCount > 0 {
+		err = tx.Commit()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// getColumnIndex 将Excel列字母转换为索引（从0开始）
+func getColumnIndex(colName string) int {
+	result := 0
+	for _, c := range strings.ToUpper(colName) {
+		if c < 'A' || c > 'Z' {
+			panic(fmt.Sprintf("无效的Excel列名: %s", colName))
+		}
+		result = result*26 + int(c-'A'+1)
+	}
+	return result - 1
 }

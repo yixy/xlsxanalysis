@@ -8,7 +8,7 @@ tables:
     sheet_index: 1 # 读取第几个 sheet (0 开始)
     columns:
       - filename_source: "name" #name/cell
-      - filename_cell: "" #B2
+      - filename_cell: "none" #B2
       - excel_col: "B"      # Excel 列名
         db_col: "file_name"  # 数据库字段名
         db_type: "TEXT"     # 数据库类型
