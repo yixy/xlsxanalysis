@@ -3,7 +3,7 @@ source_dir: "./xlsx_files"
 batch_size: 5000 # 每 100 条数据提交一次事务，提高写入速度
 
 tables:
-  - table_name: "db_scan"
+  - table_name: "sql_scan"
     sheet_index: 1 # 读取第几个 sheet (0 开始)
     columns:
       - filename_source: "name" #name/cell
