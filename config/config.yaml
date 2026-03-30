@@ -1,0 +1,28 @@
+db_path: "./data.db"
+source_dir: "./xlsx_files"
+batch_size: 5000 # 每 100 条数据提交一次事务，提高写入速度
+
+tables:
+  - table_name: "db_scan"
+    sheet_index: 1 # 读取第几个 sheet (0 开始)
+    columns:
+      - filename_source: "name" #name/cell
+      - filename_cell: "" #B2
+      - excel_col: "B"      # Excel 列名
+        db_col: "file_name"  # 数据库字段名
+        db_type: "TEXT"     # 数据库类型
+      - excel_col: "D"
+        db_col: "sql_str"
+        db_type: "TEXT"
+      - excel_col: "F"
+        db_col: "risk_code"
+        db_type: "TEXT"
+      - excel_col: "G"
+        db_col: "risk_str"
+        db_type: "TEXT"
+      - excel_col: "H"
+        db_col: "risk_level"
+        db_type: "TEXT"
+      - excel_col: "I"
+        db_col: "risk_comm"
+        db_type: "TEXT"
