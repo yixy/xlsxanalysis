@@ -2,10 +2,13 @@
 BINARY_NAME=xlsxanalysis
 MAIN_PACKAGE=./cmd/xlsxanalysis
 GO_CMD=go
-GO_BUILD=$(GO_CMD) build
+# CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v1 go1.20.14 build -ldflags="-s -w" -trimpath
+GO_BUILD=$(GO_CMD) build -ldflags="-s -w" -trimpath
 GO_CLEAN=$(GO_CMD) clean
 GO_TEST=$(GO_CMD) test
 GO_TIDY=$(GO_CMD) mod tidy
+TARGET_DIR=target
+RESOURCES=config xlsx_files
 
 .PHONY: all build build-linux build-windows build-darwin build-all clean test run tidy help
 
@@ -15,36 +18,33 @@ all: build
 # 编译项目
 build:
 	@echo "正在编译 $(BINARY_NAME)..."
-	mkdir -p target
-	cp -r config target/
-	cp -r xlsx_files target/
-
-	$(GO_BUILD) -o target/$(BINARY_NAME) $(MAIN_PACKAGE)
+	@mkdir -p $(TARGET_DIR)
+	@cp -r $(RESOURCES) $(TARGET_DIR)/
+	$(GO_BUILD) -o $(TARGET_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 	@echo "编译完成。"
 
 # 交叉编译 Linux (amd64)
 build-linux:
 	@echo "正在编译 Linux 版本..."
-	mkdir -p target/linux
-	cp -r config target/linux/
-	cp -r xlsx_files target/linux/
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO_BUILD) -o target/linux/$(BINARY_NAME) $(MAIN_PACKAGE)
+	@mkdir -p $(TARGET_DIR)/linux
+	@cp -r $(RESOURCES) $(TARGET_DIR)/linux/
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO_BUILD) -o $(TARGET_DIR)/linux/$(BINARY_NAME) $(MAIN_PACKAGE)
 
 # 交叉编译 Windows (amd64)
+# 注意：Go 1.21+ 不再支持 Windows 7。若需支持 Win7，请确保使用 Go 1.20 环境编译。
+# 设置 GOAMD64=v1 以确保兼容旧款 CPU。
 build-windows:
 	@echo "正在编译 Windows 版本..."
-	mkdir -p target/windows
-	cp -r config target/windows/
-	cp -r xlsx_files target/windows/
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO_BUILD) -o target/windows/$(BINARY_NAME).exe $(MAIN_PACKAGE)
+	@mkdir -p $(TARGET_DIR)/windows
+	@cp -r $(RESOURCES) $(TARGET_DIR)/windows/
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v1 $(GO_BUILD) -o $(TARGET_DIR)/windows/$(BINARY_NAME).exe $(MAIN_PACKAGE)
 
 # 交叉编译 Darwin (macOS amd64)
 build-darwin:
 	@echo "正在编译 macOS 版本..."
-	mkdir -p target/darwin
-	cp -r config target/darwin/
-	cp -r xlsx_files target/darwin/
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO_BUILD) -o target/darwin/$(BINARY_NAME) $(MAIN_PACKAGE)
+	@mkdir -p $(TARGET_DIR)/darwin
+	@cp -r $(RESOURCES) $(TARGET_DIR)/darwin/
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO_BUILD) -o $(TARGET_DIR)/darwin/$(BINARY_NAME) $(MAIN_PACKAGE)
 
 # 编译所有平台
 build-all: build-linux build-windows build-darwin
@@ -53,7 +53,7 @@ build-all: build-linux build-windows build-darwin
 clean:
 	@echo "正在清理..."
 	$(GO_CLEAN)
-	rm -rf target/*
+	rm -rf $(TARGET_DIR)
 	@echo "清理完毕。"
 
 # 运行测试
@@ -62,7 +62,7 @@ test:
 
 # 编译并运行
 run: build
-	./$(BINARY_NAME)
+	./$(TARGET_DIR)/$(BINARY_NAME)
 
 # 整理依赖
 tidy:
