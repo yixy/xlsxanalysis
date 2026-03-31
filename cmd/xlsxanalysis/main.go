@@ -10,24 +10,24 @@ import (
 	"time"
 
 	"github.com/tealeg/xlsx"
-	_ "modernc.org/sqlite"
 	"gopkg.in/yaml.v2"
+	_ "modernc.org/sqlite"
 )
 
 // Config 配置文件结构
 type Config struct {
-	DBPath      string  `yaml:"db_path"`
-	SourceDir   string  `yaml:"source_dir"`
-	BatchSize   int     `yaml:"batch_size"`
-	ExportPath  string  `yaml:"export_path"`
-	Tables      []Table `yaml:"tables"`
+	DBPath     string  `yaml:"db_path"`
+	SourceDir  string  `yaml:"source_dir"`
+	BatchSize  int     `yaml:"batch_size"`
+	ExportPath string  `yaml:"export_path"`
+	Tables     []Table `yaml:"tables"`
 }
 
 // Table 表配置结构
 type Table struct {
-	TableName  string    `yaml:"table_name"`
-	SheetIndex int       `yaml:"sheet_index"`
-	Columns    []Column  `yaml:"columns"`
+	TableName  string   `yaml:"table_name"`
+	SheetIndex int      `yaml:"sheet_index"`
+	Columns    []Column `yaml:"columns"`
 }
 
 // Column 列配置结构
@@ -45,6 +45,10 @@ type XlsxFileInfo struct {
 	Path string
 }
 
+// main 是 XLSX 文件分析程序的入口点。
+// 该程序会读取配置文件，连接到 SQLite 数据库，并将 XLSX 文件中的数据导入到数据库中。
+// 支持批量导入以及从多个 Excel 文件中提取数据并存储到指定的数据库表中。
+// 可选地，可以将数据库中的数据导出回 Excel 文件。
 func main() {
 	fmt.Println("开始解析XLSX文件...")
 
@@ -187,7 +191,7 @@ func exportToExcel(db *sql.DB, tables []Table, exportPath string) error {
 
 		// 查询表数据
 		query := fmt.Sprintf(`SELECT source_file, processed_time`)
-		
+
 		// 添加配置中定义的其他列
 		for _, col := range tableConfig.Columns {
 			if col.FilenameSource != "" || col.FilenameCell != "" {
@@ -195,7 +199,7 @@ func exportToExcel(db *sql.DB, tables []Table, exportPath string) error {
 			}
 			query += fmt.Sprintf(", %s", col.DBCol)
 		}
-		
+
 		query += fmt.Sprintf(` FROM "%s" ORDER BY id`, tableConfig.TableName)
 
 		rows, err := db.Query(query)
@@ -221,7 +225,7 @@ func exportToExcel(db *sql.DB, tables []Table, exportPath string) error {
 			row := sheet.AddRow()
 			values := make([]interface{}, len(columns))
 			valuePtrs := make([]interface{}, len(columns))
-			
+
 			for i := range values {
 				valuePtrs[i] = &values[i]
 			}
@@ -233,7 +237,7 @@ func exportToExcel(db *sql.DB, tables []Table, exportPath string) error {
 
 			for _, val := range values {
 				cell := row.AddCell()
-				
+
 				// 处理不同类型的值
 				switch v := val.(type) {
 				case []byte:
@@ -320,13 +324,13 @@ func getXlsxFiles(dir string) ([]XlsxFileInfo, error) {
 func createTable(db *sql.DB, tableConfig *Table) error {
 	// 构建列定义
 	columnDefs := []string{}
-	
+
 	// 添加文件名字段
 	columnDefs = append(columnDefs, `"source_file" TEXT`)
-	
+
 	// 添加处理时间字段
 	columnDefs = append(columnDefs, `"processed_time" DATETIME`)
-	
+
 	// 添加配置中定义的其他列
 	for _, col := range tableConfig.Columns {
 		// 跳过filename相关的配置项，因为它们是特殊处理的
@@ -354,7 +358,7 @@ func batchInsertData(db *sql.DB, tableConfig *Table, rows [][]string, sourceFile
 	// 准备插入语句 - 只包括实际的列，排除filename相关的配置
 	columnNames := []string{"source_file", "processed_time"}
 	valuePlaceholders := []string{"?", "?"}
-	
+
 	for _, col := range tableConfig.Columns {
 		if col.FilenameSource != "" || col.FilenameCell != "" {
 			continue
@@ -401,7 +405,7 @@ func batchInsertData(db *sql.DB, tableConfig *Table, rows [][]string, sourceFile
 			if col.FilenameSource != "" || col.FilenameCell != "" {
 				continue
 			}
-			
+
 			// 确保列名不是空字符串
 			if col.DBCol != "" {
 				// 根据列索引获取单元格值
